@@ -89,7 +89,10 @@ impl Track {
     }
 
     pub fn from_id_with_position(id: SpotifyId, position: usize) -> Self {
-        Track { id, position: Some(position) }
+        Track {
+            id,
+            position: Some(position),
+        }
     }
 
     pub async fn metadata(&self, session: &Session) -> Result<TrackMetadata> {
@@ -264,7 +267,9 @@ impl TrackMetadata {
 
 impl ToString for TrackMetadata {
     fn to_string(&self) -> String {
-        let position_string = self.position.map_or(String::from(""), |i| format!("{:02}: ", i));
+        let position_string = self
+            .position
+            .map_or(String::from(""), |i| format!("{:02}: ", i));
 
         if self.artists.len() > 3 {
             let artists_name = self
@@ -286,7 +291,10 @@ impl ToString for TrackMetadata {
             .map(|artist| artist.name.clone())
             .collect::<Vec<String>>()
             .join(", ");
-        clean_invalid_characters(format!("{}{} - {}", position_string, artists_name, self.track_name))
+        clean_invalid_characters(format!(
+            "{}{} - {}",
+            position_string, artists_name, self.track_name
+        ))
     }
 }
 

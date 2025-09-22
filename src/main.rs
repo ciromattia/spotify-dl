@@ -1,4 +1,6 @@
-use spotify_dl::download::{DownloadOptions, Downloader};
+use std::time::Duration;
+
+use spotify_dl::download::{DownloadOptions, Downloader, RateLimitConfig};
 use spotify_dl::encoder::Format;
 use spotify_dl::log;
 use spotify_dl::session::create_session;
@@ -42,6 +44,24 @@ struct Opt {
         help = "Force download even if the file already exists"
     )]
     force: bool,
+    #[structopt(
+        long = "failure-delay-ms",
+        help = "Base delay in milliseconds to wait after a download fails",
+        default_value = "0"
+    )]
+    failure_delay_ms: u64,
+    #[structopt(
+        long = "failure-delay-multiplier",
+        help = "Multiplier applied to the delay for consecutive failures",
+        default_value = "2.0"
+    )]
+    failure_delay_multiplier: f64,
+    #[structopt(
+        long = "failure-delay-max-ms",
+        help = "Maximum delay in milliseconds when backing off after failures",
+        default_value = "60000"
+    )]
+    failure_delay_max_ms: u64,
 }
 
 pub fn create_destination_if_required(destination: Option<String>) -> anyhow::Result<()> {
@@ -70,11 +90,15 @@ async fn main() -> anyhow::Result<()> {
 
     let track = get_tracks(opt.tracks, &session).await?;
 
+    let mut download_options =
+        DownloadOptions::new(opt.destination, opt.parallel, opt.format, opt.force);
+    let rate_limit = RateLimitConfig::new(
+        Duration::from_millis(opt.failure_delay_ms),
+        opt.failure_delay_multiplier,
+        Duration::from_millis(opt.failure_delay_max_ms),
+    );
+    download_options.set_rate_limit(rate_limit);
+
     let downloader = Downloader::new(session);
-    downloader
-        .download_tracks(
-            track,
-            &DownloadOptions::new(opt.destination, opt.parallel, opt.format, opt.force),
-        )
-        .await
+    downloader.download_tracks(track, &download_options).await
 }
