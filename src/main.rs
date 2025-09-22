@@ -62,6 +62,11 @@ struct Opt {
         default_value = "60000"
     )]
     failure_delay_max_ms: u64,
+    #[structopt(
+        long = "json-events",
+        help = "Emit machine-readable JSON events alongside normal output"
+    )]
+    json_events: bool,
 }
 
 pub fn create_destination_if_required(destination: Option<String>) -> anyhow::Result<()> {
@@ -98,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_millis(opt.failure_delay_max_ms),
     );
     download_options.set_rate_limit(rate_limit);
+    download_options.enable_json_events(opt.json_events);
 
     let downloader = Downloader::new(session);
     downloader.download_tracks(track, &download_options).await
