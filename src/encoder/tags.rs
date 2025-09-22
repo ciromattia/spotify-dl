@@ -11,6 +11,7 @@ pub struct Tags {
     pub artists: Vec<String>,
     pub album_title: String,
     pub album_cover: Option<Bytes>,
+    pub position: Option<usize>,
 }
 
 pub async fn store_tags(path: String, tags: &Tags, format: Format) -> Result<()> {
@@ -27,18 +28,16 @@ pub async fn store_tags(path: String, tags: &Tags, format: Format) -> Result<()>
     let mut tag = Tag::new().with_tag_type(tag_type).read_from_path(&path)?;
     tag.set_title(&tags.title);
 
-    let artists: String = tags.artists
-        .first()
-        .unwrap_or(&String::new())
-        .to_string();
+    let artists: String = tags.artists.first().unwrap_or(&String::new()).to_string();
     tag.set_artist(&artists);
     tag.set_album_title(&tags.album_title);
 
+    if let Some(track_number) = &tags.position {
+        tag.set_track_number(*track_number as u16);
+    }
+
     if let Some(cover) = &tags.album_cover {
-        tag.set_album_cover(Picture::new(
-            cover.as_ref(),
-            audiotags::MimeType::Jpeg,
-        ));
+        tag.set_album_cover(Picture::new(cover.as_ref(), audiotags::MimeType::Jpeg));
     }
 
     tag.write_to_path(&path)?;
