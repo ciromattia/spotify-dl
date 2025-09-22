@@ -85,6 +85,7 @@ pub struct DownloadOptions {
     pub format: Format,
     pub force: bool,
     pub rate_limit: RateLimitConfig,
+    pub json_events: bool,
 }
 
 impl DownloadOptions {
@@ -97,11 +98,16 @@ impl DownloadOptions {
             format,
             force,
             rate_limit: RateLimitConfig::default(),
+            json_events: false,
         }
     }
 
     pub fn set_rate_limit(&mut self, rate_limit: RateLimitConfig) {
         self.rate_limit = rate_limit;
+    }
+
+    pub fn enable_json_events(&mut self, enabled: bool) {
+        self.json_events = enabled;
     }
 }
 
@@ -119,10 +125,12 @@ impl RateLimiter {
         }
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&self) -> Option<Duration> {
         if !self.config.is_enabled() {
-            return;
+            return None;
         }
+
+        let mut waited = Duration::ZERO;
 
         loop {
             let sleep_duration = {
@@ -141,11 +149,16 @@ impl RateLimiter {
             };
 
             match sleep_duration {
-                Some(duration) if !duration.is_zero() => sleep(duration).await,
+                Some(duration) if !duration.is_zero() => {
+                    sleep(duration).await;
+                    waited += duration;
+                }
                 Some(_) => continue,
                 None => break,
             }
         }
+
+        if waited.is_zero() { None } else { Some(waited) }
     }
 
     async fn on_failure(&self) -> Duration {
@@ -212,6 +225,197 @@ struct RateLimiterState {
     next_ready: Option<Instant>,
 }
 
+#[derive(Debug, Clone)]
+struct EventEmitter {
+    enabled: bool,
+}
+
+impl EventEmitter {
+    fn new(enabled: bool) -> Self {
+        EventEmitter { enabled }
+    }
+
+    fn emit(&self, kind: &str, fields: &[EventField<'_>]) {
+        if !self.enabled {
+            return;
+        }
+
+        let mut output = String::with_capacity(128);
+        output.push('{');
+        output.push_str("\"event\":\"");
+        output.push_str(&json_escape(kind));
+        output.push('"');
+        for field in fields {
+            output.push(',');
+            output.push('"');
+            output.push_str(&json_escape(field.key));
+            output.push_str("\":");
+            field.value.write_json(&mut output);
+        }
+        output.push('}');
+        println!("{}", output);
+    }
+
+    fn emit_track_event(
+        &self,
+        kind: &str,
+        track_id: &str,
+        track_label: &str,
+        extra: &[EventField<'_>],
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let mut fields = Vec::with_capacity(extra.len() + 2);
+        fields.push(EventField::str("track_id", track_id));
+        fields.push(EventField::str("track", track_label));
+        fields.extend_from_slice(extra);
+        self.emit(kind, &fields);
+    }
+
+    fn emit_stage(
+        &self,
+        stage: &str,
+        status: &str,
+        progress: f64,
+        track_id: &str,
+        track_label: &str,
+    ) {
+        let progress = progress.clamp(0.0, 100.0);
+        let fields = [
+            EventField::str("stage", stage),
+            EventField::str("status", status),
+            EventField::float("progress", progress),
+        ];
+        self.emit_track_event("stage", track_id, track_label, &fields);
+    }
+
+    fn emit_retry(
+        &self,
+        track_id: &str,
+        track_label: &str,
+        stage: &str,
+        attempt: usize,
+        max_attempts: usize,
+    ) {
+        let fields = [
+            EventField::str("stage", stage),
+            EventField::int("attempt", attempt as i64),
+            EventField::int("max_attempts", max_attempts as i64),
+        ];
+        self.emit_track_event("retry", track_id, track_label, &fields);
+    }
+
+    fn emit_failure(&self, track_id: &str, track_label: &str, reason: &str) {
+        let fields = [EventField::str("reason", reason)];
+        self.emit_track_event("track_failed", track_id, track_label, &fields);
+    }
+
+    fn emit_skip(&self, track_id: &str, track_label: &str) {
+        self.emit_track_event("track_skipped", track_id, track_label, &[]);
+    }
+
+    fn emit_start(&self, track_id: &str, track_label: &str) {
+        self.emit_track_event("track_start", track_id, track_label, &[]);
+    }
+
+    fn emit_complete(&self, track_id: &str, track_label: &str, path: &str) {
+        let fields = [EventField::str("path", path)];
+        self.emit_track_event("track_complete", track_id, track_label, &fields);
+    }
+
+    fn emit_backoff(&self, track_id: &str, track_label: &str, delay_ms: u64, reason: &str) {
+        let fields = [
+            EventField::int("delay_ms", delay_ms as i64),
+            EventField::str("reason", reason),
+        ];
+        self.emit_track_event("rate_limit_backoff", track_id, track_label, &fields);
+    }
+
+    fn emit_wait(&self, track_id: &str, track_label: &str, waited_ms: u64) {
+        let fields = [EventField::int("waited_ms", waited_ms as i64)];
+        self.emit_track_event("rate_limit_wait", track_id, track_label, &fields);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EventField<'a> {
+    key: &'a str,
+    value: EventValue<'a>,
+}
+
+impl<'a> EventField<'a> {
+    fn new(key: &'a str, value: EventValue<'a>) -> Self {
+        EventField { key, value }
+    }
+
+    fn str(key: &'a str, value: &'a str) -> Self {
+        EventField::new(key, EventValue::Str(value))
+    }
+
+    fn int(key: &'a str, value: i64) -> Self {
+        EventField::new(key, EventValue::Int(value))
+    }
+
+    fn float(key: &'a str, value: f64) -> Self {
+        EventField::new(key, EventValue::Float(value))
+    }
+
+    #[allow(dead_code)]
+    fn bool(key: &'a str, value: bool) -> Self {
+        EventField::new(key, EventValue::Bool(value))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EventValue<'a> {
+    Str(&'a str),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+impl EventValue<'_> {
+    fn write_json(self, buf: &mut String) {
+        match self {
+            EventValue::Str(value) => {
+                buf.push('"');
+                buf.push_str(&json_escape(value));
+                buf.push('"');
+            }
+            EventValue::Int(value) => {
+                let _ = write!(buf, "{}", value);
+            }
+            EventValue::Float(value) => {
+                if value.is_finite() {
+                    let _ = write!(buf, "{:.2}", value);
+                } else {
+                    buf.push_str("null");
+                }
+            }
+            EventValue::Bool(value) => {
+                buf.push_str(if value { "true" } else { "false" });
+            }
+        }
+    }
+}
+
+fn json_escape(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 impl Downloader {
     pub fn new(session: Session) -> Self {
         Downloader {
@@ -226,11 +430,16 @@ impl Downloader {
         options: &DownloadOptions,
     ) -> Result<()> {
         let rate_limiter = Arc::new(RateLimiter::new(options.rate_limit.clone()));
+        let event_emitter = Arc::new(EventEmitter::new(options.json_events));
 
         futures::stream::iter(tracks)
             .map(|track| {
                 let rate_limiter = Arc::clone(&rate_limiter);
-                async move { self.download_track(track, options, rate_limiter).await }
+                let event_emitter = Arc::clone(&event_emitter);
+                async move {
+                    self.download_track(track, options, rate_limiter, event_emitter)
+                        .await
+                }
             })
             .buffer_unordered(options.parallel)
             .try_collect::<Vec<_>>()
@@ -239,17 +448,28 @@ impl Downloader {
         Ok(())
     }
 
-    #[tracing::instrument(name = "download_track", skip(self, options, rate_limiter))]
+    #[tracing::instrument(name = "download_track", skip(self, options, rate_limiter, event_emitter))]
     async fn download_track(
         &self,
         track: Track,
         options: &DownloadOptions,
         rate_limiter: Arc<RateLimiter>,
+        event_emitter: Arc<EventEmitter>,
     ) -> Result<()> {
-        rate_limiter.wait_ready().await;
+        let track_id = track
+            .id
+            .to_base62()
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let waited = rate_limiter.wait_ready().await;
 
         let metadata = track.metadata(&self.session).await?;
         let track_label = metadata.to_string();
+        if let Some(waited) = waited {
+            if waited > Duration::ZERO {
+                event_emitter.emit_wait(&track_id, &track_label, waited.as_millis() as u64);
+            }
+        }
         tracing::info!("Downloading track: {:?}", metadata.track_name);
 
         let filename = format!("{}.{}", track_label, options.format.extension());
@@ -266,47 +486,89 @@ impl Downloader {
                 &metadata.track_name
             );
             rate_limiter.on_success().await;
+            event_emitter.emit_skip(&track_id, &track_label);
             return Ok(());
         }
 
+        event_emitter.emit_start(&track_id, &track_label);
+
         let pb = self.add_progress_bar(&metadata);
+
+        event_emitter.emit_stage("downloading", "start", 0.0, &track_id, &track_label);
 
         let stream = Stream::new(self.session.clone());
         let channel = match stream.stream(track).await {
             Ok(channel) => channel,
             Err(e) => {
-                self.fail_with_error(&pb, &track_label, e.to_string());
-                self.backoff_after_failure(&rate_limiter, &track_label)
-                    .await;
+                let reason = e.to_string();
+                self.fail_with_error(&pb, &track_label, reason.clone());
+                event_emitter.emit_failure(&track_id, &track_label, &reason);
+                self.backoff_after_failure(
+                    &rate_limiter,
+                    &track_label,
+                    &track_id,
+                    &event_emitter,
+                    &reason,
+                )
+                .await;
                 return Ok(());
             }
         };
 
-        let samples = match self.buffer_track(channel, &pb, &metadata).await {
+        let samples = match self
+            .buffer_track(
+                channel,
+                &pb,
+                &metadata,
+                &event_emitter,
+                &track_label,
+                &track_id,
+            )
+            .await
+        {
             Ok(samples) => samples,
             Err(e) => {
-                self.fail_with_error(&pb, &track_label, e.to_string());
-                self.backoff_after_failure(&rate_limiter, &track_label)
-                    .await;
+                let reason = e.to_string();
+                self.fail_with_error(&pb, &track_label, reason.clone());
+                event_emitter.emit_failure(&track_id, &track_label, &reason);
+                self.backoff_after_failure(
+                    &rate_limiter,
+                    &track_label,
+                    &track_id,
+                    &event_emitter,
+                    &reason,
+                )
+                .await;
                 return Ok(());
             }
         };
+
+        event_emitter.emit_stage("downloading", "complete", 100.0, &track_id, &track_label);
 
         tracing::info!("Encoding track: {}", track_label);
         pb.set_message(format!("Encoding {}", track_label));
+        event_emitter.emit_stage("encoding", "start", 0.0, &track_id, &track_label);
 
         let encoder = crate::encoder::get_encoder(options.format);
         let stream = encoder.encode(samples).await?;
 
+        event_emitter.emit_stage("encoding", "complete", 100.0, &track_id, &track_label);
+
         pb.set_message(format!("Writing {}", track_label));
         tracing::info!("Writing track: {:?} to file: {}", track_label, &path);
+        event_emitter.emit_stage("writing", "start", 0.0, &track_id, &track_label);
         stream.write_to_file(&path).await?;
+        event_emitter.emit_stage("writing", "complete", 100.0, &track_id, &track_label);
 
+        event_emitter.emit_stage("tagging", "start", 0.0, &track_id, &track_label);
         let tags = metadata.tags().await?;
+        let output_path = path.clone();
         encoder::tags::store_tags(path, &tags, options.format).await?;
+        event_emitter.emit_stage("tagging", "complete", 100.0, &track_id, &track_label);
 
         pb.finish_with_message(format!("Downloaded {}", track_label));
         rate_limiter.on_success().await;
+        event_emitter.emit_complete(&track_id, &track_label, &output_path);
         Ok(())
     }
 
@@ -329,8 +591,12 @@ impl Downloader {
         mut rx: StreamEventChannel,
         pb: &ProgressBar,
         metadata: &TrackMetadata,
+        event_emitter: &EventEmitter,
+        track_label: &str,
+        track_id: &str,
     ) -> Result<Samples> {
         let mut samples = Vec::<i32>::new();
+        let mut last_reported = 0.0_f64;
         while let Some(event) = rx.recv().await {
             match event {
                 StreamEvent::Write {
@@ -341,9 +607,32 @@ impl Downloader {
                     tracing::trace!("Written {} bytes out of {}", bytes, total);
                     pb.set_position(bytes as u64);
                     samples.append(&mut content);
+
+                    if total > 0 {
+                        let progress = (bytes as f64 / total as f64) * 100.0;
+                        if progress.is_finite()
+                            && (progress - last_reported >= 1.0 || progress >= 99.5)
+                        {
+                            event_emitter.emit_stage(
+                                "downloading",
+                                "progress",
+                                progress,
+                                track_id,
+                                track_label,
+                            );
+                            last_reported = progress;
+                        }
+                    }
                 }
                 StreamEvent::Finished => {
                     tracing::info!("Finished downloading track");
+                    event_emitter.emit_stage(
+                        "downloading",
+                        "progress",
+                        100.0,
+                        track_id,
+                        track_label,
+                    );
                     break;
                 }
                 StreamEvent::Error(stream_error) => {
@@ -359,6 +648,13 @@ impl Downloader {
                         attempt,
                         max_attempts,
                         metadata.to_string()
+                    );
+                    event_emitter.emit_retry(
+                        track_id,
+                        track_label,
+                        "downloading",
+                        attempt,
+                        max_attempts,
                     );
                     pb.set_message(format!(
                         "Retrying ({}/{}) {}",
@@ -387,7 +683,14 @@ impl Downloader {
         );
     }
 
-    async fn backoff_after_failure(&self, rate_limiter: &RateLimiter, track_label: &str) {
+    async fn backoff_after_failure(
+        &self,
+        rate_limiter: &RateLimiter,
+        track_label: &str,
+        track_id: &str,
+        event_emitter: &EventEmitter,
+        reason: &str,
+    ) {
         let delay = rate_limiter.on_failure().await;
         if delay.is_zero() {
             return;
@@ -399,6 +702,7 @@ impl Downloader {
             track = track_label,
             "Rate limit backoff triggered after download failure"
         );
+        event_emitter.emit_backoff(track_id, track_label, delay_ms, reason);
 
         let message = format!(
             "[rate-limit] Backing off for {:.1}s after failure: {}",

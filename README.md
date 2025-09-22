@@ -14,6 +14,7 @@ A command line utility to download songs, podcasts, playlists and albums directl
 - Built with Rust for speed and efficiency.
 - Supports metadata tagging and organized file output.
 - Customizable failure backoff to respect Spotify rate limits when retries happen.
+- Optional JSON event stream for easy GUI integration.
 
 ## ⚙️ Installation
 
@@ -41,7 +42,7 @@ cargo install --git https://github.com/GuillemCastro/spotify-dl.git
 ## 🧭 Usage
 
 ```
-spotify-dl 0.9.4-z-er
+spotify-dl 0.9.5-z-er
 A commandline utility to download music directly from Spotify
 
 USAGE:
@@ -59,6 +60,7 @@ OPTIONS:
         --failure-delay-ms <ms>        Base delay in milliseconds to wait after a failure [default: 0]
         --failure-delay-multiplier <x> Multiplier applied to the delay for consecutive failures [default: 2]
         --failure-delay-max-ms <ms>    Cap on backoff delay in milliseconds [default: 60000]
+        --json-events                  Emit machine-readable JSON events alongside normal output
 
 ARGS:
     <tracks>...    A list of Spotify URIs or URLs (songs, podcasts, playlists or albums)
@@ -75,6 +77,16 @@ Network hiccups or Spotify throttling can cause occasional download failures. Th
 - `--failure-delay-max-ms`: maximum delay cap so exponential growth does not run away.
 
 When a backoff is triggered you will see a `[rate-limit]` message in the log and the next track waits before starting. Pair this with the GUI’s adaptive queue controls to keep longer sessions stable.
+
+## 🧾 JSON Events
+
+Pass `--json-events` to print a line-delimited JSON feed that mirrors each track's lifecycle:
+
+- `track_start`, `track_complete`, and `track_failed` include `track_id`, `track`, and (for completion) the output path.
+- `stage` events announce transitions (`downloading`, `encoding`, `writing`, `tagging`) with a `status` of `start`, `progress`, or `complete` plus a percentage.
+- `retry`, `rate_limit_backoff`, and `rate_limit_wait` expose retry attempts and any cooldown the downloader observes.
+
+The GUI can read stdout line-by-line and `json.loads` each event without scraping progress bars or colours.
 
 ## 📋 Examples
 
