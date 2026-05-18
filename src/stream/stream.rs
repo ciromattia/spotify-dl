@@ -33,6 +33,7 @@ impl Stream {
         let metadata = track.metadata(&self.session).await?;
         let (sink, mut channel) = ChannelSink::new(metadata);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let track_id = track.id.clone();
 
         let player = Player::new(
             self.player_config.clone(),
@@ -42,16 +43,19 @@ impl Stream {
         );
 
         tokio::spawn(async move {
+            let retry_track_id = track_id.clone();
+            let retry_tx = tx.clone();
             match tryhard::retry_fn(|| async { Self::load(player.clone(), &track).await })
                 .retries(3)
-                .on_retry(|attempt, _, e| {
+                .on_retry(move |attempt, _, e| {
                     let error = format!("{}", e);
-                    let tx = tx.clone();
+                    let tx = retry_tx.clone();
+                    let track_id = retry_track_id.clone();
                     async move {
                         tracing::warn!(
                             "Attempt {} to load track {:?} failed: {}",
                             attempt,
-                            track.id,
+                            track_id,
                             error
                         );
                         Self::send_event(
@@ -68,14 +72,14 @@ impl Stream {
                 .max_delay(Duration::from_secs(30))
                 .await
             {
-                Ok(_) => tracing::info!("Track loaded successfully: {:?}", track.id),
+                Ok(_) => tracing::info!("Track loaded successfully: {:?}", track_id),
                 Err(e) => {
-                    tracing::error!("Failed to load track: {:?}, error: {:?}", track.id, e);
+                    tracing::error!("Failed to load track: {:?}, error: {:?}", track_id, e);
                     Self::send_event(
                         &tx,
                         StreamEvent::Error(StreamError::LoadError(format!(
                             "Failed to load track: {:?}",
-                            track.id
+                            track_id
                         ))),
                     )
                     .await;
@@ -83,7 +87,7 @@ impl Stream {
                 }
             }
 
-            tracing::info!("Streaming track: {:?}", track.id);
+            tracing::info!("Streaming track: {:?}", track_id);
 
             while let Some(event) = channel.recv().await {
                 match event {
@@ -114,7 +118,7 @@ impl Stream {
     }
 
     async fn load(player: Arc<Player>, track: &Track) -> Result<()> {
-        player.load(track.id, true, 0);
+        player.load(track.id.clone(), true, 0);
 
         tracing::info!("Loading track: {:?}", track.id);
         loop {

@@ -458,8 +458,8 @@ impl Downloader {
     ) -> Result<()> {
         let track_id = track
             .id
-            .to_base62()
-            .unwrap_or_else(|_| "unknown".to_string());
+            .to_id()
+            .unwrap_or_else(|_| track.id.to_string());
 
         let waited = rate_limiter.wait_ready().await;
 

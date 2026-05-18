@@ -29,20 +29,20 @@ cargo install spotify-dl
 ### Using homebrew (macOs)
 
 ```
-brew tap guillemcastro/spotify-dl
+brew tap z-er/spotify-dl
 brew install spotify-dl
 ```
 
 ### From source
 
 ```
-cargo install --git https://github.com/GuillemCastro/spotify-dl.git
+cargo install --git https://github.com/z-er/spotify-dl.git
 ```
 
 ## 🧭 Usage
 
 ```
-spotify-dl 0.9.5-z-er
+spotify-dl 0.9.7-z-er
 A commandline utility to download music directly from Spotify
 
 USAGE:
